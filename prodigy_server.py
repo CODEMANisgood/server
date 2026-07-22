@@ -48,7 +48,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import http
 import json
+import os
 import random
 import ssl
 
@@ -191,10 +193,23 @@ async def handle_connection(server: Server, ws):
         await server.leave(client)
 
 
+async def health_check(connection, request):
+    """Answer plain HTTP requests (e.g. Render's health-check probe, or
+    anyone opening the URL in a browser tab) with a normal HTTP response
+    instead of letting them fail as a broken WebSocket handshake. A real
+    WebSocket connection always carries an "Upgrade: websocket" header,
+    so only requests missing that get intercepted here - everything else
+    proceeds to the normal handshake untouched."""
+    if request.headers.get("Upgrade", "").lower() != "websocket":
+        return connection.respond(http.HTTPStatus.OK, "AMC Quest relay is running.\n")
+    return None
+
+
 async def run_server(host: str, port: int, ssl_context: ssl.SSLContext | None):
     server = Server()
     scheme = "wss" if ssl_context else "ws"
-    async with serve(lambda ws: handle_connection(server, ws), host, port, ssl=ssl_context) as ws_server:
+    async with serve(lambda ws: handle_connection(server, ws), host, port, ssl=ssl_context,
+                      process_request=health_check) as ws_server:
         print(f"AMC Quest PvP relay listening on {scheme}://{host}:{port}")
         print("Share your reachable address:port with the other player to battle.")
         await ws_server.wait_closed()
@@ -203,7 +218,12 @@ async def run_server(host: str, port: int, ssl_context: ssl.SSLContext | None):
 def main():
     parser = argparse.ArgumentParser(description="AMC Quest online PvP relay server")
     parser.add_argument("--host", default="0.0.0.0", help="Address to listen on (default 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port to listen on (default {DEFAULT_PORT})")
+    # Render (and most PaaS hosts) assign a port dynamically via the PORT
+    # env var - the server must bind to that, not a fixed port, or the
+    # platform's edge proxy won't be able to reach it. Falls back to
+    # DEFAULT_PORT for plain local runs where PORT isn't set.
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", DEFAULT_PORT)),
+                         help=f"Port to listen on (default {DEFAULT_PORT}, or $PORT if set)")
     parser.add_argument("--cert", default=None, help="TLS certificate file (enables wss://, e.g. fullchain.pem)")
     parser.add_argument("--key", default=None, help="TLS private key file (required if --cert is given)")
     args = parser.parse_args()
